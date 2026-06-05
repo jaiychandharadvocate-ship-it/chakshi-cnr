@@ -3382,6 +3382,406 @@ async def scrape_case_details(page) -> dict:
     return details
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# MULTI-MODE CASE-STATUS SEARCH — native Chakshi form backend (Phase 1)
+# ---------------------------------------------------------------------------
+# A parallel REST API (the /search/* namespace) that drives the eCourts
+# "Case Status" page's seven tabs from a clean Chakshi UI. It reuses the proven
+# primitives already in this file:
+#   • scrape_dropdown_options / select_*_and_get_*  → the geographic cascade
+#   • capture_captcha                               → user-solved captcha
+#   • submit_form_and_scrape (via /submit-captcha)  → results
+# The existing iframe + conversational /chat flow is untouched.
+#
+# Because each session keeps ONE live page, the location (state→district→
+# court complex→establishment) is set incrementally as the dropdowns are
+# fetched, so /search/submit only needs to: click the tab, fill mode fields,
+# capture the captcha. /submit-captcha and /results then finish (both are
+# already mode-agnostic).
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Phase 1c — keep the Starter instance (512MB) from OOMing under many live
+# Chromium sessions, and reap browsers left open by abandoned searches.
+MAX_CONCURRENT_SEARCHES = int(os.getenv("MAX_CONCURRENT_SEARCHES", "3"))
+SEARCH_IDLE_TIMEOUT = int(os.getenv("SEARCH_IDLE_TIMEOUT", "600"))  # 10 min idle
+
+# Per-mode metadata: the visible tab text + which user inputs that tab needs.
+# `dropdown` names the dependent picklist (fetched live from eCourts) if any.
+SEARCH_MODES: Dict[str, Dict[str, Any]] = {
+    "party_name":    {"tab": "Party Name",    "dropdown": None,            "fields": ["party_name", "case_year", "status"]},
+    "case_number":   {"tab": "Case Number",   "dropdown": "case_types",    "fields": ["case_type", "case_number", "case_year", "status"]},
+    "filing_number": {"tab": "Filing Number", "dropdown": None,            "fields": ["filing_number", "filing_year", "status"]},
+    "advocate":      {"tab": "Advocate",      "dropdown": None,            "fields": ["advocate_name", "bar_reg_no", "case_year", "status"]},
+    "fir":           {"tab": "FIR Number",    "dropdown": "police_stations","fields": ["police_station", "fir_number", "fir_year", "status"]},
+    "act":           {"tab": "Act",           "dropdown": "acts",          "fields": ["act", "status"]},
+    "case_type":     {"tab": "Case Type",     "dropdown": "case_types",    "fields": ["case_type", "case_year", "status"]},
+}
+
+# Defensive selector candidates for the mode-specific dropdowns (eCourts v6
+# IDs vary by tab; we try several and fall back gracefully to []).
+CASE_TYPE_SELECTORS = [
+    'select#case_type', 'select[name="case_type"]', 'select#caseType',
+    'select#case_type_2', 'select[name="case_type_2"]', 'select#casetype',
+]
+POLICE_STATION_SELECTORS = [
+    'select#police_station', 'select[name="police_station"]',
+    'select#fir_police_station', 'select#policestation', 'select[name="ps"]',
+]
+ACT_SELECTORS = [
+    'select#actcode', 'select[name="actcode"]', 'select#act_type',
+    'select[name="act_type"]', 'select#bear_act', 'select#act', 'select[name="act"]',
+]
+
+
+def _active_session_count() -> int:
+    return sum(1 for s in SESSIONS.values() if s.get("browser") is not None)
+
+
+async def _cleanup_idle_search_sessions() -> None:
+    """Close browsers for sessions idle longer than SEARCH_IDLE_TIMEOUT."""
+    now = time.time()
+    stale = [sid for sid, s in SESSIONS.items()
+             if s.get("browser") is not None
+             and now - s.get("last_activity", s.get("created_at", now)) > SEARCH_IDLE_TIMEOUT]
+    for sid in stale:
+        s = SESSIONS.get(sid, {})
+        try:
+            if s.get("context"): await s["context"].close()
+            if s.get("browser"): await s["browser"].close()
+            if s.get("pw"): await s["pw"].stop()
+        except Exception:
+            pass
+        SESSIONS.pop(sid, None)
+        print(f"[search] reaped idle session {sid}")
+
+
+def _touch(session: dict) -> None:
+    session["last_activity"] = time.time()
+
+
+def _require_session(session_id: str) -> dict:
+    session = SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    if not session.get("page"):
+        raise HTTPException(status_code=409, detail=f"Session not ready (status: {session.get('status')})")
+    _touch(session)
+    return session
+
+
+async def _scrape_first(page: Page, selectors: List[str]):
+    """Return (options, selector) for the first dropdown selector that yields options."""
+    for sel in selectors:
+        opts = await scrape_dropdown_options(page, sel)
+        if opts:
+            return opts, sel
+    return [], None
+
+
+# ---- generic tab / field helpers (defensive: real selectors → JS fallback) ----
+
+async def _click_tab(page: Page, tab_text: str) -> bool:
+    for sel in [f'a:has-text("{tab_text}")', f'li a:has-text("{tab_text}")',
+                f'[data-toggle="tab"]:has-text("{tab_text}")', f'button:has-text("{tab_text}")']:
+        try:
+            el = await page.query_selector(sel)
+            if el and await el.is_visible():
+                await el.click()
+                await page.wait_for_timeout(1200)
+                return True
+        except Exception:
+            continue
+    try:
+        clicked = await page.evaluate(
+            "(t) => { for (const e of document.querySelectorAll('a,button,li')) {"
+            " if ((e.textContent||'').toLowerCase().trim().includes(t)) { e.click(); return true; } } return false; }",
+            tab_text.lower())
+        if clicked:
+            await page.wait_for_timeout(1200)
+            return True
+    except Exception:
+        pass
+    print(f"[search] WARN: could not click tab '{tab_text}'")
+    return False
+
+
+async def _fill_input(page: Page, selectors: List[str], value, keyword: str = "") -> bool:
+    if value is None or str(value).strip() == "":
+        return True  # nothing to fill is not a failure
+    value = str(value)
+    for sel in selectors:
+        try:
+            el = await page.query_selector(sel)
+            if el and await el.is_visible():
+                await el.click()
+                await el.fill("")
+                await el.type(value, delay=40)
+                await page.keyboard.press("Tab")
+                return True
+        except Exception:
+            continue
+    if keyword:
+        try:
+            ok = await page.evaluate(
+                "([kw, val]) => { for (const inp of document.querySelectorAll('input')) {"
+                " const m = ((inp.id||'')+' '+(inp.name||'')+' '+(inp.placeholder||'')).toLowerCase();"
+                " if (m.includes(kw)) { inp.focus(); inp.value = val;"
+                " inp.dispatchEvent(new Event('input',{bubbles:true}));"
+                " inp.dispatchEvent(new Event('change',{bubbles:true})); return true; } } return false; }",
+                [keyword.lower(), value])
+            return bool(ok)
+        except Exception:
+            pass
+    print(f"[search] WARN: could not fill input ({keyword or selectors[0]})")
+    return False
+
+
+async def _select_dropdown(page: Page, selectors: List[str], value) -> bool:
+    if not value:
+        return True
+    for sel in selectors:
+        try:
+            if await page.query_selector(sel):
+                await page.select_option(sel, str(value))
+                await page.wait_for_timeout(1000)
+                return True
+        except Exception:
+            continue
+    print(f"[search] WARN: could not select dropdown {selectors[0]} = {value}")
+    return False
+
+
+async def _select_status(page: Page, status: str) -> bool:
+    status = (status or "both").lower()
+    cands = {"pending": ["Pending", "P", "pending"],
+             "disposed": ["Disposed", "D", "disposed"],
+             "both": ["Both", "B", "both"]}.get(status, ["Both", "B", "both"])
+    for v in cands:
+        for sel in [f'input[type="radio"][value="{v}"]', f'input[type="radio"][value="{v.lower()}"]']:
+            try:
+                el = await page.query_selector(sel)
+                if el:
+                    await el.check()
+                    return True
+            except Exception:
+                continue
+    try:
+        return bool(await page.evaluate(
+            "(want) => { for (const r of document.querySelectorAll('input[type=radio]')) {"
+            " let lbl=''; if (r.id){ const l=document.querySelector('label[for=\"'+r.id+'\"]'); if(l) lbl=l.textContent||''; }"
+            " lbl=(lbl+' '+(r.value||'')+' '+(r.parentElement?r.parentElement.textContent:'')).toLowerCase();"
+            " if (lbl.includes(want)) { r.checked=true; r.dispatchEvent(new Event('change',{bubbles:true})); return true; } } return false; }",
+            status))
+    except Exception:
+        return False
+
+
+# ---- per-mode tab fillers (location already set on the live page) ----
+
+async def fill_tab_party_name(page: Page, p: Dict[str, Any]):
+    await _click_tab(page, "Party Name")
+    await _fill_input(page, ['input#pet_name', 'input[name="pet_name"]', 'input#petres_name',
+                             'input[placeholder*="Petitioner" i]'], p.get("party_name"), keyword="pet")
+    await _fill_input(page, ['input#rgyear', 'input[name="rgyear"]', 'input[placeholder*="Year" i]'],
+                      p.get("case_year"), keyword="year")
+    await _select_status(page, p.get("status"))
+
+
+async def fill_tab_case_number(page: Page, p: Dict[str, Any]):
+    await _click_tab(page, "Case Number")
+    await _select_dropdown(page, CASE_TYPE_SELECTORS, p.get("case_type"))
+    await _fill_input(page, ['input#case_no', 'input[name="case_no"]', 'input#caseno',
+                             'input[placeholder*="Case Number" i]'], p.get("case_number"), keyword="case_no")
+    await _fill_input(page, ['input#rgyear', 'input#case_year', 'input[name="case_year"]',
+                             'input[name="rgyear"]'], p.get("case_year"), keyword="year")
+    await _select_status(page, p.get("status"))
+
+
+async def fill_tab_filing_number(page: Page, p: Dict[str, Any]):
+    await _click_tab(page, "Filing Number")
+    await _fill_input(page, ['input#filing_no', 'input[name="filing_no"]', 'input#filingno',
+                             'input[placeholder*="Filing" i]'], p.get("filing_number"), keyword="filing")
+    await _fill_input(page, ['input#filing_year', 'input[name="filing_year"]', 'input#fyear',
+                             'input[placeholder*="Year" i]'], p.get("filing_year"), keyword="year")
+    await _select_status(page, p.get("status"))
+
+
+async def fill_tab_advocate(page: Page, p: Dict[str, Any]):
+    await _click_tab(page, "Advocate")
+    # eCourts offers Name OR Bar registration number — fill whichever was given.
+    await _fill_input(page, ['input#advocate_name', 'input[name="advocate_name"]', 'input#adv_name',
+                             'input[placeholder*="Advocate" i]'], p.get("advocate_name"), keyword="advocate")
+    await _fill_input(page, ['input#bar_reg_no', 'input[name="bar_reg_no"]', 'input#barcode',
+                             'input#bar_code', 'input[placeholder*="Bar" i]'], p.get("bar_reg_no"), keyword="bar")
+    await _fill_input(page, ['input#rgyear', 'input[name="rgyear"]', 'input[placeholder*="Year" i]'],
+                      p.get("case_year"), keyword="year")
+    await _select_status(page, p.get("status"))
+
+
+async def fill_tab_fir(page: Page, p: Dict[str, Any]):
+    await _click_tab(page, "FIR Number")
+    await _select_dropdown(page, POLICE_STATION_SELECTORS, p.get("police_station"))
+    await _fill_input(page, ['input#fir_no', 'input[name="fir_no"]', 'input#firno',
+                             'input[placeholder*="FIR" i]'], p.get("fir_number"), keyword="fir")
+    await _fill_input(page, ['input#fir_year', 'input[name="fir_year"]', 'input#firyear',
+                             'input[placeholder*="Year" i]'], p.get("fir_year"), keyword="year")
+    await _select_status(page, p.get("status"))
+
+
+async def fill_tab_act(page: Page, p: Dict[str, Any]):
+    await _click_tab(page, "Act")
+    await _select_dropdown(page, ACT_SELECTORS, p.get("act"))
+    await _select_status(page, p.get("status"))
+
+
+async def fill_tab_case_type(page: Page, p: Dict[str, Any]):
+    await _click_tab(page, "Case Type")
+    await _select_dropdown(page, CASE_TYPE_SELECTORS, p.get("case_type"))
+    await _fill_input(page, ['input#rgyear', 'input#case_year', 'input[name="case_year"]',
+                             'input[name="rgyear"]'], p.get("case_year"), keyword="year")
+    await _select_status(page, p.get("status"))
+
+
+TAB_FILLERS = {
+    "party_name": fill_tab_party_name,
+    "case_number": fill_tab_case_number,
+    "filing_number": fill_tab_filing_number,
+    "advocate": fill_tab_advocate,
+    "fir": fill_tab_fir,
+    "act": fill_tab_act,
+    "case_type": fill_tab_case_type,
+}
+
+
+# ───────────────────────────── Pydantic bodies ─────────────────────────────
+
+class SearchSubmit(BaseModel):
+    session_id: str
+    mode: str
+    # mode-specific (all optional; validated per mode)
+    party_name: Optional[str] = None
+    case_type: Optional[str] = None
+    case_number: Optional[str] = None
+    case_year: Optional[str] = None
+    filing_number: Optional[str] = None
+    filing_year: Optional[str] = None
+    advocate_name: Optional[str] = None
+    bar_reg_no: Optional[str] = None
+    police_station: Optional[str] = None
+    fir_number: Optional[str] = None
+    fir_year: Optional[str] = None
+    act: Optional[str] = None
+    status: Optional[str] = "both"
+
+
+# ───────────────────────────── REST endpoints ─────────────────────────────
+
+@app.post("/search/session")
+async def search_session():
+    """Open a Case Status session: launch a browser on the eCourts casestatus
+    page and return a session_id + the list of states + the supported modes."""
+    await cleanup_old_sessions()
+    await _cleanup_idle_search_sessions()
+    if _active_session_count() >= MAX_CONCURRENT_SEARCHES:
+        raise HTTPException(status_code=429,
+                            detail="Search is busy right now — please retry in a moment.")
+
+    session_id = base64.urlsafe_b64encode(os.urandom(12)).decode().rstrip("=")
+    SESSIONS[session_id] = {"status": "starting", "created_at": time.time(),
+                            "last_activity": time.time(), "mode": "case_status"}
+    await init_party_search_session(session_id)  # navigates to casestatus page, scrapes states
+
+    session = SESSIONS.get(session_id, {})
+    if session.get("status") == "error":
+        raise HTTPException(status_code=502, detail=session.get("error", "Failed to reach eCourts"))
+
+    return {
+        "session_id": session_id,
+        "states": session.get("state_options", []),
+        "modes": [{"id": m, "label": cfg["tab"], "fields": cfg["fields"]} for m, cfg in SEARCH_MODES.items()],
+    }
+
+
+@app.get("/search/options/districts")
+async def search_options_districts(session_id: str, state_value: str, state_text: str = ""):
+    _require_session(session_id)
+    await select_state_and_get_districts(session_id, state_value, state_text)
+    s = SESSIONS[session_id]
+    if s.get("status") == "error":
+        raise HTTPException(status_code=502, detail=s.get("error", "eCourts error"))
+    return {"districts": s.get("district_options", [])}
+
+
+@app.get("/search/options/court-complexes")
+async def search_options_court_complexes(session_id: str, district_value: str, district_text: str = ""):
+    _require_session(session_id)
+    await select_district_and_get_courts(session_id, district_value, district_text)
+    s = SESSIONS[session_id]
+    if s.get("status") == "error":
+        raise HTTPException(status_code=502, detail=s.get("error", "eCourts error"))
+    return {"court_complexes": s.get("court_complex_options", [])}
+
+
+@app.get("/search/options/establishments")
+async def search_options_establishments(session_id: str, court_value: str = "", court_text: str = ""):
+    _require_session(session_id)
+    await select_court_complex_and_get_establishments(session_id, court_value, court_text)
+    s = SESSIONS[session_id]
+    if s.get("status") == "error":
+        raise HTTPException(status_code=502, detail=s.get("error", "eCourts error"))
+    return {"establishments": s.get("establishment_options", [])}
+
+
+@app.get("/search/options/mode-fields")
+async def search_options_mode_fields(session_id: str, mode: str, est_value: str = "", est_text: str = ""):
+    """Lock in the establishment, open the chosen tab, and return that tab's
+    dependent picklist (case types / police stations / acts), if any."""
+    session = _require_session(session_id)
+    if mode not in SEARCH_MODES:
+        raise HTTPException(status_code=400, detail=f"Unknown mode '{mode}'")
+    await select_establishment_and_prepare_form(session_id, est_value, est_text)
+    page = session["page"]
+    await _click_tab(page, SEARCH_MODES[mode]["tab"])
+    await page.wait_for_timeout(1200)
+
+    out: Dict[str, Any] = {"mode": mode, "case_types": [], "police_stations": [], "acts": []}
+    dd = SEARCH_MODES[mode]["dropdown"]
+    if dd == "case_types":
+        out["case_types"], _ = await _scrape_first(page, CASE_TYPE_SELECTORS)
+    elif dd == "police_stations":
+        out["police_stations"], _ = await _scrape_first(page, POLICE_STATION_SELECTORS)
+    elif dd == "acts":
+        out["acts"], _ = await _scrape_first(page, ACT_SELECTORS)
+    return out
+
+
+@app.post("/search/submit")
+async def search_submit(body: SearchSubmit):
+    """Fill the chosen tab with the user's inputs and capture the captcha.
+    The client then calls POST /submit-captcha and GET /results (both reused)."""
+    session = _require_session(body.session_id)
+    if body.mode not in TAB_FILLERS:
+        raise HTTPException(status_code=400, detail=f"Unknown mode '{body.mode}'")
+
+    page = session["page"]
+    try:
+        await TAB_FILLERS[body.mode](page, body.dict())
+        captcha_b64, selector_used = await capture_captcha(page)
+        if not captcha_b64:
+            raise HTTPException(status_code=502, detail="Could not capture captcha from eCourts")
+        session.update({"status": "awaiting_captcha", "captcha_b64": captcha_b64,
+                        "captcha_selector": selector_used})
+        _touch(session)
+        return {"status": "awaiting_captcha", "session_id": body.session_id, "captcha_b64": captcha_b64}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[search] submit error: {e}")
+        session["status"] = "error"
+        session["error"] = str(e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
