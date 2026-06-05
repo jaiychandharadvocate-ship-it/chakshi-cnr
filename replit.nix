@@ -1,0 +1,33 @@
+{ pkgs }: {
+  deps = [
+    pkgs.gdk-pixbuf
+    pkgs.gtk3
+    pkgs.xorg.libXrandr
+    pkgs.xorg.libXext
+    pkgs.xorg.libX11
+    pkgs.libgbm
+    pkgs.glib
+    pkgs.alsa-lib
+    pkgs.cairo
+    pkgs.pango
+    pkgs.mesa
+    pkgs.xorg.libXfixes
+    pkgs.xorg.libXdamage
+    pkgs.xorg.libXcomposite
+    pkgs.at-spi2-core
+    pkgs.libxkbcommon
+    pkgs.xorg.libxcb
+    pkgs.expat
+    pkgs.libdrm
+    pkgs.cups
+    pkgs.at-spi2-atk
+    pkgs.atk
+    pkgs.dbus
+    pkgs.nspr
+    pkgs.nss
+    pkgs.python311
+    pkgs.python311Packages.pip
+    pkgs.chromium
+    pkgs.playwright-driver
+  ];
+}

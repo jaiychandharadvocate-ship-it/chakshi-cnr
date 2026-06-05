@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: chakshi-cnr
+    runtime: docker          # build from the Dockerfile (reliable Chromium + system deps)
+    region: singapore        # close to your other services
+    plan: starter            # PAID — Chromium OOMs on Free
+    envVars:
+      - key: HEADLESS_MODE
+        value: true
