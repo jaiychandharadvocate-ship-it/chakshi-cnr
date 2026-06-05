@@ -356,11 +356,22 @@ async def cleanup_old_sessions():
 
 
 async def start_browser(headless: bool = True):
-    """Initialize Playwright browser"""
+    """Initialize Playwright browser. Flags tuned for low-memory containers:
+    --disable-dev-shm-usage is essential on Render (small /dev/shm) to avoid
+    Chromium crashes; the rest trim memory/startup."""
     pw = await async_playwright().start()
     browser = await pw.chromium.launch(
         headless=headless,
-        args=['--disable-blink-features=AutomationControlled']
+        args=[
+            '--disable-blink-features=AutomationControlled',
+            '--disable-dev-shm-usage',
+            '--no-sandbox',
+            '--disable-gpu',
+            '--disable-extensions',
+            '--disable-background-networking',
+            '--disable-features=site-per-process',
+            '--mute-audio',
+        ],
     )
     return pw, browser
 
@@ -392,6 +403,22 @@ async def scrape_dropdown_options(page: Page, selector: str) -> List[Dict[str, s
     return options
 
 
+async def _wait_options(page: Page, selectors: List[str], min_options: int = 2, timeout_ms: int = 8000) -> bool:
+    """Wait until one of the dropdowns has real options populated (AJAX). Much
+    faster + more reliable than a fixed sleep — returns as soon as data lands,
+    and gives up after timeout_ms."""
+    deadline = time.time() + timeout_ms / 1000
+    while time.time() < deadline:
+        for sel in selectors:
+            try:
+                if len(await page.query_selector_all(f'{sel} option')) >= min_options:
+                    return True
+            except Exception:
+                pass
+        await page.wait_for_timeout(250)
+    return False
+
+
 async def init_party_search_session(session_id: str):
     """Initialize a party name search session - navigate to eCourts and scrape state options"""
     pw = None
@@ -414,11 +441,13 @@ async def init_party_search_session(session_id: str):
         page = await context.new_page()
         
         print(f"[INFO] Navigating to {url}")
-        await page.goto(url, wait_until='networkidle', timeout=60000)
-        await page.wait_for_timeout(2000)
-        
+        # domcontentloaded (not networkidle): the eCourts page keeps long-poll
+        # connections open so networkidle often waits the full timeout.
+        await page.goto(url, wait_until='domcontentloaded', timeout=45000)
+
         # Scrape state options
         state_selectors = ['select#sess_state_code', 'select#state_code', 'select[name="state_code"]']
+        await _wait_options(page, state_selectors)
         state_options = []
         used_selector = None
         
@@ -479,12 +508,10 @@ async def select_state_and_get_districts(session_id: str, state_value: str, stat
         # Select the state
         await page.select_option(state_selector, state_value)
         print(f"[DEBUG] Selected state: {state_text} ({state_value})")
-        
-        # Wait for district dropdown to populate (AJAX)
-        await page.wait_for_timeout(2500)
-        
-        # Scrape district options
+
+        # Wait for district dropdown to populate (AJAX) — smart wait
         district_selectors = ['select#sess_dist_code', 'select#dist_code', 'select[name="dist_code"]']
+        await _wait_options(page, district_selectors)
         district_options = []
         used_selector = None
         
@@ -521,12 +548,10 @@ async def select_district_and_get_courts(session_id: str, district_value: str, d
         # Select the district
         await page.select_option(district_selector, district_value)
         print(f"[DEBUG] Selected district: {district_text} ({district_value})")
-        
-        # Wait for court complex dropdown to populate
-        await page.wait_for_timeout(2500)
-        
-        # Scrape court complex options
+
+        # Wait for court complex dropdown to populate — smart wait
         court_selectors = ['select#court_complex_code', 'select[name="court_complex_code"]']
+        await _wait_options(page, court_selectors)
         court_options = []
         used_selector = None
         
@@ -560,13 +585,13 @@ async def select_court_complex_and_get_establishments(session_id: str, court_val
         page = session['page']
         court_selector = session.get('court_complex_selector', 'select#court_complex_code')
         
+        est_selectors = ['select#court_est_code', 'select[name="court_est_code"]', 'select#establishment_code']
         if court_value and court_value != 'skip':
             await page.select_option(court_selector, court_value)
             print(f"[DEBUG] Selected court complex: {court_text} ({court_value})")
-            await page.wait_for_timeout(2000)
-        
+            await _wait_options(page, est_selectors, timeout_ms=4000)
+
         # Scrape establishment options
-        est_selectors = ['select#court_est_code', 'select[name="court_est_code"]', 'select#establishment_code']
         est_options = []
         used_selector = None
         
@@ -3403,7 +3428,7 @@ async def scrape_case_details(page) -> dict:
 # Phase 1c — keep the Starter instance (512MB) from OOMing under many live
 # Chromium sessions, and reap browsers left open by abandoned searches.
 MAX_CONCURRENT_SEARCHES = int(os.getenv("MAX_CONCURRENT_SEARCHES", "1"))  # 512MB fits ~1 Chromium
-SEARCH_IDLE_TIMEOUT = int(os.getenv("SEARCH_IDLE_TIMEOUT", "600"))  # 10 min idle
+SEARCH_IDLE_TIMEOUT = int(os.getenv("SEARCH_IDLE_TIMEOUT", "150"))  # 2.5 min: free stuck slots fast
 
 # Per-mode metadata: the visible tab text + which user inputs that tab needs.
 # `dropdown` names the dependent picklist (fetched live from eCourts) if any.
