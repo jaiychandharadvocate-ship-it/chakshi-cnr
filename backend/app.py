@@ -3419,17 +3419,19 @@ SEARCH_MODES: Dict[str, Dict[str, Any]] = {
 
 # Defensive selector candidates for the mode-specific dropdowns (eCourts v6
 # IDs vary by tab; we try several and fall back gracefully to []).
+# Real eCourts ids (confirmed via live DOM introspection 2026-06-06).
+# `:visible` first so the case-type picker grabs whichever select the active
+# tab is showing (Case Number tab and Case Type tab both use name="case_type").
 CASE_TYPE_SELECTORS = [
-    'select#case_type', 'select[name="case_type"]', 'select#caseType',
-    'select#case_type_2', 'select[name="case_type_2"]', 'select#casetype',
+    'select#case_type:visible', 'select[name="case_type"]:visible',
+    'select#case_type', 'select[name="case_type"]', 'select[id^="case_type"]',
 ]
 POLICE_STATION_SELECTORS = [
+    'select#police_st_code', 'select[name="police_st_code"]',
     'select#police_station', 'select[name="police_station"]',
-    'select#fir_police_station', 'select#policestation', 'select[name="ps"]',
 ]
 ACT_SELECTORS = [
-    'select#actcode', 'select[name="actcode"]', 'select#act_type',
-    'select[name="act_type"]', 'select#bear_act', 'select#act', 'select[name="act"]',
+    'select#actcode', 'select[name="actcode"]', 'select#act_type', 'select#act',
 ]
 
 
@@ -3481,23 +3483,27 @@ async def _scrape_first(page: Page, selectors: List[str]):
 # ---- generic tab / field helpers (defensive: real selectors → JS fallback) ----
 
 async def _click_tab(page: Page, tab_text: str) -> bool:
-    for sel in [f'a:has-text("{tab_text}")', f'li a:has-text("{tab_text}")',
-                f'[data-toggle="tab"]:has-text("{tab_text}")', f'button:has-text("{tab_text}")']:
+    # EXACT text match first (":text-is") so short labels like "Act" don't match
+    # "Contact"; fall back to substring only as a last resort.
+    for sel in [f'a:text-is("{tab_text}")', f'button:text-is("{tab_text}")',
+                f'[role="tab"]:text-is("{tab_text}")', f'li a:text-is("{tab_text}")',
+                f'a:has-text("{tab_text}")']:
         try:
             el = await page.query_selector(sel)
             if el and await el.is_visible():
                 await el.click()
-                await page.wait_for_timeout(1200)
+                await page.wait_for_timeout(1300)
                 return True
         except Exception:
             continue
+    # JS fallback: EXACT trimmed text equality (not includes).
     try:
         clicked = await page.evaluate(
-            "(t) => { for (const e of document.querySelectorAll('a,button,li')) {"
-            " if ((e.textContent||'').toLowerCase().trim().includes(t)) { e.click(); return true; } } return false; }",
+            "(t) => { for (const e of document.querySelectorAll('a,button,[role=tab]')) {"
+            " if ((e.textContent||'').trim().toLowerCase() === t) { e.click(); return true; } } return false; }",
             tab_text.lower())
         if clicked:
-            await page.wait_for_timeout(1200)
+            await page.wait_for_timeout(1300)
             return True
     except Exception:
         pass
@@ -3580,40 +3586,39 @@ async def _select_status(page: Page, status: str) -> bool:
 
 async def fill_tab_party_name(page: Page, p: Dict[str, Any]):
     await _click_tab(page, "Party Name")
-    await _fill_input(page, ['input#pet_name', 'input[name="pet_name"]', 'input#petres_name',
-                             'input[placeholder*="Petitioner" i]'], p.get("party_name"), keyword="pet")
-    await _fill_input(page, ['input#rgyear', 'input[name="rgyear"]', 'input[placeholder*="Year" i]'],
-                      p.get("case_year"), keyword="year")
+    await _fill_input(page, ['input#petres_name', 'input[name="petres_name"]', 'input#pet_name',
+                             'input[placeholder*="Petitioner" i]'], p.get("party_name"), keyword="petres")
+    await _fill_input(page, ['input#rgyearP', 'input[name="rgyearP"]', 'input#rgyear',
+                             'input[name="rgyear"]'], p.get("case_year"), keyword="year")
     await _select_status(page, p.get("status"))
 
 
 async def fill_tab_case_number(page: Page, p: Dict[str, Any]):
     await _click_tab(page, "Case Number")
     await _select_dropdown(page, CASE_TYPE_SELECTORS, p.get("case_type"))
-    await _fill_input(page, ['input#case_no', 'input[name="case_no"]', 'input#caseno',
+    await _fill_input(page, ['input#search_case_no', 'input[name="search_case_no"]', 'input#case_no',
                              'input[placeholder*="Case Number" i]'], p.get("case_number"), keyword="case_no")
-    await _fill_input(page, ['input#rgyear', 'input#case_year', 'input[name="case_year"]',
-                             'input[name="rgyear"]'], p.get("case_year"), keyword="year")
+    await _fill_input(page, ['input#rgyear', 'input[name="rgyear"]'], p.get("case_year"), keyword="year")
     await _select_status(page, p.get("status"))
 
 
 async def fill_tab_filing_number(page: Page, p: Dict[str, Any]):
     await _click_tab(page, "Filing Number")
-    await _fill_input(page, ['input#filing_no', 'input[name="filing_no"]', 'input#filingno',
+    await _fill_input(page, ['input#filing_no', 'input[name="filing_no"]',
                              'input[placeholder*="Filing" i]'], p.get("filing_number"), keyword="filing")
-    await _fill_input(page, ['input#filing_year', 'input[name="filing_year"]', 'input#fyear',
-                             'input[placeholder*="Year" i]'], p.get("filing_year"), keyword="year")
+    await _fill_input(page, ['input#filyear', 'input[name="filyear"]', 'input#filing_year'],
+                      p.get("filing_year"), keyword="year")
     await _select_status(page, p.get("status"))
 
 
 async def fill_tab_advocate(page: Page, p: Dict[str, Any]):
     await _click_tab(page, "Advocate")
     # eCourts offers Name OR Bar registration number — fill whichever was given.
-    await _fill_input(page, ['input#advocate_name', 'input[name="advocate_name"]', 'input#adv_name',
+    await _fill_input(page, ['input#advocate_name', 'input[name="advocate_name"]',
                              'input[placeholder*="Advocate" i]'], p.get("advocate_name"), keyword="advocate")
-    await _fill_input(page, ['input#bar_reg_no', 'input[name="bar_reg_no"]', 'input#barcode',
-                             'input#bar_code', 'input[placeholder*="Bar" i]'], p.get("bar_reg_no"), keyword="bar")
-    await _fill_input(page, ['input#rgyear', 'input[name="rgyear"]', 'input[placeholder*="Year" i]'],
+    await _fill_input(page, ['input#adv_bar_code', 'input[name="adv_bar_code"]', 'input#bar_reg_no'],
+                      p.get("bar_reg_no"), keyword="bar")
+    await _fill_input(page, ['input#adv_bar_year', 'input[name="adv_bar_year"]'],
                       p.get("case_year"), keyword="year")
     await _select_status(page, p.get("status"))
 
@@ -3621,10 +3626,10 @@ async def fill_tab_advocate(page: Page, p: Dict[str, Any]):
 async def fill_tab_fir(page: Page, p: Dict[str, Any]):
     await _click_tab(page, "FIR Number")
     await _select_dropdown(page, POLICE_STATION_SELECTORS, p.get("police_station"))
-    await _fill_input(page, ['input#fir_no', 'input[name="fir_no"]', 'input#firno',
+    await _fill_input(page, ['input#fir_no', 'input[name="fir_no"]',
                              'input[placeholder*="FIR" i]'], p.get("fir_number"), keyword="fir")
-    await _fill_input(page, ['input#fir_year', 'input[name="fir_year"]', 'input#firyear',
-                             'input[placeholder*="Year" i]'], p.get("fir_year"), keyword="year")
+    await _fill_input(page, ['input#firyear', 'input[name="firyear"]', 'input#fir_year'],
+                      p.get("fir_year"), keyword="year")
     await _select_status(page, p.get("status"))
 
 
@@ -3637,8 +3642,8 @@ async def fill_tab_act(page: Page, p: Dict[str, Any]):
 async def fill_tab_case_type(page: Page, p: Dict[str, Any]):
     await _click_tab(page, "Case Type")
     await _select_dropdown(page, CASE_TYPE_SELECTORS, p.get("case_type"))
-    await _fill_input(page, ['input#rgyear', 'input#case_year', 'input[name="case_year"]',
-                             'input[name="rgyear"]'], p.get("case_year"), keyword="year")
+    await _fill_input(page, ['input#search_year', 'input[name="search_year"]', 'input#rgyear'],
+                      p.get("case_year"), keyword="year")
     await _select_status(page, p.get("status"))
 
 
