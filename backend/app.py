@@ -3402,7 +3402,7 @@ async def scrape_case_details(page) -> dict:
 
 # Phase 1c — keep the Starter instance (512MB) from OOMing under many live
 # Chromium sessions, and reap browsers left open by abandoned searches.
-MAX_CONCURRENT_SEARCHES = int(os.getenv("MAX_CONCURRENT_SEARCHES", "3"))
+MAX_CONCURRENT_SEARCHES = int(os.getenv("MAX_CONCURRENT_SEARCHES", "1"))  # 512MB fits ~1 Chromium
 SEARCH_IDLE_TIMEOUT = int(os.getenv("SEARCH_IDLE_TIMEOUT", "600"))  # 10 min idle
 
 # Per-mode metadata: the visible tab text + which user inputs that tab needs.
@@ -3780,6 +3780,28 @@ async def search_submit(body: SearchSubmit):
         session["status"] = "error"
         session["error"] = str(e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/search/debug/dom")
+async def search_debug_dom(session_id: str, mode: str = "", est_value: str = ""):
+    """TEMPORARY introspection: open a tab and dump every <select>/<input> so we
+    can discover the real eCourts selectors for FIR/Act/establishment. Remove
+    once selectors are locked in."""
+    session = _require_session(session_id)
+    page = session["page"]
+    if mode and mode in SEARCH_MODES:
+        if est_value:
+            await select_establishment_and_prepare_form(session_id, est_value, "")
+        await _click_tab(page, SEARCH_MODES[mode]["tab"])
+        await page.wait_for_timeout(1800)
+    dom = await page.evaluate(
+        "() => {"
+        " const sels=[...document.querySelectorAll('select')].map(s=>({id:s.id||'',name:s.name||'',"
+        " visible:!!s.offsetParent,options:s.options.length,sample:[...s.options].slice(0,3).map(o=>(o.text||'').trim())}));"
+        " const inps=[...document.querySelectorAll('input')].filter(i=>['text','number','search',''].includes(i.type||''))"
+        " .map(i=>({id:i.id||'',name:i.name||'',placeholder:i.placeholder||'',visible:!!i.offsetParent}));"
+        " return {selects:sels, inputs:inps}; }")
+    return dom
 
 
 if __name__ == "__main__":
