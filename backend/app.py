@@ -3787,28 +3787,6 @@ async def search_submit(body: SearchSubmit):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/search/debug/dom")
-async def search_debug_dom(session_id: str, mode: str = "", est_value: str = ""):
-    """TEMPORARY introspection: open a tab and dump every <select>/<input> so we
-    can discover the real eCourts selectors for FIR/Act/establishment. Remove
-    once selectors are locked in."""
-    session = _require_session(session_id)
-    page = session["page"]
-    if mode and mode in SEARCH_MODES:
-        if est_value:
-            await select_establishment_and_prepare_form(session_id, est_value, "")
-        await _click_tab(page, SEARCH_MODES[mode]["tab"])
-        await page.wait_for_timeout(1800)
-    dom = await page.evaluate(
-        "() => {"
-        " const sels=[...document.querySelectorAll('select')].map(s=>({id:s.id||'',name:s.name||'',"
-        " visible:!!s.offsetParent,options:s.options.length,sample:[...s.options].slice(0,3).map(o=>(o.text||'').trim())}));"
-        " const inps=[...document.querySelectorAll('input')].filter(i=>['text','number','search',''].includes(i.type||''))"
-        " .map(i=>({id:i.id||'',name:i.name||'',placeholder:i.placeholder||'',visible:!!i.offsetParent}));"
-        " return {selects:sels, inputs:inps}; }")
-    return dom
-
-
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
