@@ -3930,6 +3930,77 @@ async def fetch_order(body: FetchOrder):
         return {"status": "error", "error": f"Couldn't fetch the order PDF: {e}"}
 
 
+# ── Open a hearing's "Business on Date" (daily proceedings) from the case page ─
+# Clicks the Nth business-date link in the Case History table within the live session.
+# eCourts returns either a PDF (the day's order) or an HTML modal (the day's business);
+# we capture whichever and return it. history_index matches the case_history array order.
+class ViewBusiness(BaseModel):
+    session_id: str
+    history_index: int = 0
+
+
+@app.post("/search/view-business")
+async def view_business(body: ViewBusiness):
+    session = _require_session(body.session_id)
+    page = session.get("page")
+    if not page:
+        raise HTTPException(status_code=409, detail="Browser session expired. Please search again.")
+    captured = {}
+
+    async def _on_resp(resp):
+        try:
+            if "pdf" in (resp.headers.get("content-type") or "").lower() and "pdf" not in captured:
+                captured["pdf"] = await resp.body()
+        except Exception:
+            pass
+
+    page.on("response", _on_resp)
+    try:
+        clicked = await page.evaluate(
+            """(idx) => {
+                const tables = [...document.querySelectorAll('table')];
+                const ht = tables.find(t => /business on date/i.test(t.innerText) && /purpose/i.test(t.innerText));
+                if (!ht) return 'no-table';
+                const anchors = [...ht.querySelectorAll('tr')]
+                    .map(r => r.querySelectorAll('td')[1]).filter(Boolean)
+                    .map(td => td.querySelector('a')).filter(Boolean);
+                if (idx >= anchors.length) return 'no-anchor';
+                anchors[idx].click();
+                return 'ok';
+            }""",
+            body.history_index,
+        )
+        if clicked != "ok":
+            return {"status": "error", "error": "Couldn't open that hearing date."}
+        await asyncio.sleep(3)
+        if captured.get("pdf"):
+            return {"status": "ok", "type": "pdf", "filename": "business.pdf",
+                    "pdf_base64": base64.b64encode(captured["pdf"]).decode("ascii")}
+        text = await page.evaluate(
+            """() => {
+                const sels = ['.modal.show .modal-body', '.bootbox .modal-body', '.modal-body',
+                              '#caseBusinessDiv', '#showBusiness', '.case_business', '#b6'];
+                for (const s of sels) { const el = document.querySelector(s); if (el && el.innerText.trim().length > 20) return el.innerText.trim(); }
+                return '';
+            }"""
+        )
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        if text:
+            return {"status": "ok", "type": "text", "text": text[:20000]}
+        return {"status": "error", "error": "Opened the date, but couldn't read the day's business."}
+    except Exception as e:
+        print(f"[search] view-business error: {e}")
+        return {"status": "error", "error": f"Couldn't open the daily business: {e}"}
+    finally:
+        try:
+            page.remove_listener("response", _on_resp)
+        except Exception:
+            pass
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
