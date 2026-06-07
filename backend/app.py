@@ -3897,13 +3897,15 @@ async def fetch_order(body: FetchOrder):
     if not page:
         raise HTTPException(status_code=409, detail="Browser session expired. Please search again.")
     try:
+        # Matches "Copy of Order", "Copy of Deposition", "Copy of Judgment", etc. — any
+        # document link in the Interim/Final Orders table — plus any direct .pdf anchor.
         links = await page.query_selector_all(
-            'a:has-text("Copy of Order"), a:has-text("Order Copy"), a:has-text("View Order"), a[href*="order"][href*=".pdf"]'
+            'a:has-text("Copy of"), a:has-text("Order Copy"), a:has-text("View Order"), a[href*=".pdf"]'
         )
         if not links:
-            return {"status": "error", "error": "No downloadable order found on this case."}
+            return {"status": "error", "error": "No downloadable document found on this case."}
         if body.order_index >= len(links):
-            return {"status": "error", "error": f"Order {body.order_index + 1} not found (only {len(links)} available)."}
+            return {"status": "error", "error": f"Document {body.order_index + 1} not found (only {len(links)} available)."}
         async with page.expect_response(
             lambda r: "pdf" in (r.headers.get("content-type") or "").lower(), timeout=25000
         ) as resp_info:
