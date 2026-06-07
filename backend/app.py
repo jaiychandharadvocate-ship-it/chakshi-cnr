@@ -3812,6 +3812,38 @@ async def search_submit(body: SearchSubmit):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Full case detail from a structured-search result (Option A) ───────────────
+# Reuses the already-open browser session from /search/submit + /submit-captcha, so
+# opening a case needs NO extra captcha. Mirrors the chat flow's /chat/view-case but
+# keyed directly on the search session_id. Fire-and-poll: POST starts the scrape;
+# GET /search/case-status/{session_id} returns it when status == 'viewing_case_completed'.
+class SearchViewCase(BaseModel):
+    session_id: str
+    case_index: int
+
+
+@app.post("/search/view-case")
+async def search_view_case(body: SearchViewCase):
+    session = _require_session(body.session_id)   # 404 if gone / 409 if page not ready
+    session["status"] = "viewing_case"
+    session.pop("case_details", None)
+    session.pop("error", None)
+    asyncio.create_task(click_view_and_extract_details(session, body.case_index))
+    return {"status": "loading", "session_id": body.session_id, "message": "Loading full case details…"}
+
+
+@app.get("/search/case-status/{session_id}")
+async def search_case_status(session_id: str):
+    session = SESSIONS.get(session_id)
+    if not session:
+        return {"status": "session_expired"}
+    return {
+        "status": session.get("status"),
+        "case_details": session.get("case_details"),
+        "error": session.get("error"),
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
