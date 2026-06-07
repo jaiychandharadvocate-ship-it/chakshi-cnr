@@ -3345,7 +3345,43 @@ async def scrape_case_details(page) -> dict:
                         if (transfers.length > 0) details.case_transfers = transfers;
                     }
                 }
-                
+
+                // 9. Processes (Process ID / Title / Date) — find by the table's header text
+                const procTable = Array.from(document.querySelectorAll('table')).find(t => /process id/i.test(t.innerText) && /process title/i.test(t.innerText));
+                if (procTable) {
+                    const processes = [];
+                    procTable.querySelectorAll('tr').forEach(row => {
+                        const cells = row.querySelectorAll('td');
+                        if (cells.length >= 3 && !/process id/i.test(getText(cells[0]))) {
+                            processes.push({
+                                process_id: getText(cells[0]),
+                                process_title: getText(cells[1]),
+                                process_date: getText(cells[2])
+                            });
+                        }
+                    });
+                    if (processes.length > 0) details.processes = processes;
+                }
+
+                // 10. IA Status (interlocutory applications)
+                const iaTable = Array.from(document.querySelectorAll('table')).find(t => /ia number/i.test(t.innerText) && /(ia status|date of filing)/i.test(t.innerText));
+                if (iaTable) {
+                    const ias = [];
+                    iaTable.querySelectorAll('tr').forEach(row => {
+                        const cells = row.querySelectorAll('td');
+                        if (cells.length >= 5 && !/ia number/i.test(getText(cells[0]))) {
+                            ias.push({
+                                ia_number: getText(cells[0]),
+                                party_name: getText(cells[1]),
+                                date_of_filing: getText(cells[2]),
+                                next_date_purpose: getText(cells[3]),
+                                ia_status: getText(cells[4])
+                            });
+                        }
+                    });
+                    if (ias.length > 0) details.ia_status = ias;
+                }
+
                 // Fallback: Get court/establishment from header
                 const courtHeader = document.querySelector('h2.text-center, h4.text-center');
                 if (courtHeader) {
