@@ -3880,6 +3880,54 @@ async def search_case_status(session_id: str):
     }
 
 
+# ── Download a court order PDF from the open case-detail page ──────────────────
+# On eCourts the order is a "Copy of Order" link in the Interim/Final Orders table.
+# Clicking it loads the PDF; we intercept that PDF response in the live session and
+# return it as base64 so the app can show/download it. The session page is on the
+# case-detail page after /search/view-case (same-page navigation), so the links are present.
+class FetchOrder(BaseModel):
+    session_id: str
+    order_index: int = 0
+
+
+@app.post("/search/fetch-order")
+async def fetch_order(body: FetchOrder):
+    session = _require_session(body.session_id)
+    page = session.get("page")
+    if not page:
+        raise HTTPException(status_code=409, detail="Browser session expired. Please search again.")
+    try:
+        links = await page.query_selector_all(
+            'a:has-text("Copy of Order"), a:has-text("Order Copy"), a:has-text("View Order"), a[href*="order"][href*=".pdf"]'
+        )
+        if not links:
+            return {"status": "error", "error": "No downloadable order found on this case."}
+        if body.order_index >= len(links):
+            return {"status": "error", "error": f"Order {body.order_index + 1} not found (only {len(links)} available)."}
+        async with page.expect_response(
+            lambda r: "pdf" in (r.headers.get("content-type") or "").lower(), timeout=25000
+        ) as resp_info:
+            await links[body.order_index].click()
+        resp = await resp_info.value
+        pdf_bytes = await resp.body()
+        try:
+            await page.keyboard.press("Escape")   # close the PDF viewer modal, keep page usable
+        except Exception:
+            pass
+        filename = (resp.url.split("/")[-1].split("?")[0] or "order") or "order"
+        if not filename.lower().endswith(".pdf"):
+            filename += ".pdf"
+        return {
+            "status": "ok",
+            "filename": filename,
+            "content_type": "application/pdf",
+            "pdf_base64": base64.b64encode(pdf_bytes).decode("ascii"),
+        }
+    except Exception as e:
+        print(f"[search] fetch-order error: {e}")
+        return {"status": "error", "error": f"Couldn't fetch the order PDF: {e}"}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
