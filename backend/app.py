@@ -1961,7 +1961,26 @@ async def scrape_cnr_results(page: Page, results: dict):
         
     except Exception as e:
         print(f"[DEBUG] Error scraping CNR results: {e}")
-        results['error'] = f"Error scraping CNR case details: {str(e)}"
+        # A wrong captcha leaves the results container empty/hidden, which lands
+        # here as a wait timeout. Detect it and say so in plain words instead of
+        # dumping a Playwright stack trace on the user.
+        invalid_captcha = False
+        try:
+            body_text = (await page.evaluate("() => document.body.innerText || ''")).lower()
+            if 'invalid captcha' in body_text or 'enter captcha' in body_text or 'captcha' in body_text and 'incorrect' in body_text:
+                invalid_captcha = True
+            if not invalid_captcha:
+                empty_container = await page.evaluate(
+                    "() => { const c = document.querySelector('#history_cnr, #CNRDetails'); return c ? c.innerText.trim().length < 10 : false; }")
+                if empty_container and 'Timeout' in str(e):
+                    invalid_captcha = True
+        except Exception:
+            pass
+        if invalid_captcha:
+            results['error'] = "The captcha didn't match, so eCourts rejected the search. Please search again and type the characters exactly as shown."
+        else:
+            results['error'] = "eCourts didn't return the case details (the site may be slow or its layout changed). Please try the search again."
+        results['error_detail'] = str(e)[:300]
 
 
 async def scrape_results(page: Page, search_type: str = 'auto'):
