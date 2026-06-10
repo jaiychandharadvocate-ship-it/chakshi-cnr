@@ -1866,43 +1866,37 @@ async def scrape_cnr_results(page: Page, results: dict):
     print("[DEBUG] Scraping CNR results...")
     
     try:
-        # Wait for CNR result container
-        await page.wait_for_selector('#history_cnr, #CNRDetails, .case_details_table', timeout=10000)
+        # Wait for CNR result container (plain `table` as last resort — the
+        # redesigned eCourts pages dropped all the legacy ids/classes)
+        await page.wait_for_selector('#history_cnr, #CNRDetails, .case_details_table, table', timeout=10000)
         
         # Scrape case details using JavaScript
         case_details = await page.evaluate("""
             () => {
                 const details = {};
                 
-                // Case Details Table
-                const caseTable = document.querySelector('.case_details_table, #caseDetails table');
-                if (caseTable) {
-                    caseTable.querySelectorAll('tr').forEach(tr => {
-                        const cells = tr.querySelectorAll('td');
+                // Harvest label/value pairs from EVERY table (markup-agnostic:
+                // the legacy .case_details_table/.case_status_table classes are
+                // gone from the redesigned eCourts pages). 2-col and 4-col rows.
+                document.querySelectorAll('table').forEach(tbl => {
+                    tbl.querySelectorAll('tr').forEach(tr => {
+                        const cells = tr.querySelectorAll('td, th');
                         if (cells.length >= 2) {
                             const label = cells[0].innerText.trim().replace(':', '');
                             const value = cells[1].innerText.trim();
-                            if (label && value) {
-                                details[label] = value;
+                            if (label && value && label.length < 60 && value.length < 400) {
+                                if (!details[label]) details[label] = value;
+                            }
+                        }
+                        if (cells.length >= 4) {
+                            const label2 = cells[2].innerText.trim().replace(':', '');
+                            const value2 = cells[3].innerText.trim();
+                            if (label2 && value2 && label2.length < 60 && value2.length < 400) {
+                                if (!details[label2]) details[label2] = value2;
                             }
                         }
                     });
-                }
-                
-                // Case Status Table
-                const statusTable = document.querySelector('.case_status_table');
-                if (statusTable) {
-                    statusTable.querySelectorAll('tr').forEach(tr => {
-                        const cells = tr.querySelectorAll('td');
-                        if (cells.length >= 2) {
-                            const label = cells[0].innerText.trim().replace(':', '');
-                            const value = cells[1].innerText.trim();
-                            if (label && value) {
-                                details[label] = value;
-                            }
-                        }
-                    });
-                }
+                });
                 
                 // Petitioner/Respondent sections
                 const petH3 = document.evaluate("//h3[contains(text(), 'Petitioner')]", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
@@ -3171,10 +3165,38 @@ async def scrape_case_details(page) -> dict:
         case_data = await page.evaluate("""
             () => {
                 const details = {};
-                
+
                 // Helper to get text content
                 const getText = (el) => el ? el.innerText.trim() : '';
-                
+
+                // 0. Generic harvest FIRST: label/value pairs from EVERY table.
+                // Markup-agnostic, so eCourts redesigns (which renamed all the
+                // legacy classes this scraper targeted) can't blank the details.
+                const normLbl = (s) => (s || '').toLowerCase().replace(/[:*]/g, '').replace(/\\s+/g, ' ').trim();
+                const LABELS = {
+                    'case type': 'case_type', 'filing number': 'filing_number', 'filing date': 'filing_date',
+                    'registration number': 'registration_number', 'registration date': 'registration_date',
+                    'cnr number': 'cnr_number', 'e-filing number': 'efiling_number', 'e-filing date': 'efiling_date',
+                    'first hearing date': 'first_hearing_date', 'next hearing date': 'next_hearing_date',
+                    'decision date': 'decision_date', 'case status': 'case_status', 'nature of disposal': 'nature_of_disposal',
+                    'case stage': 'case_stage', 'court number and judge': 'judge', 'police station': 'police_station',
+                    'fir number': 'fir_details', 'under act': 'under_act', 'under section': 'under_section'
+                };
+                const setIf = (label, value) => {
+                    const l = normLbl(label);
+                    if (!l || !value) return;
+                    for (const k in LABELS) {
+                        if (l === k || l.startsWith(k)) { if (!details[LABELS[k]]) details[LABELS[k]] = value.trim(); return; }
+                    }
+                };
+                try {
+                    document.querySelectorAll('table tr').forEach(tr => {
+                        const cells = tr.querySelectorAll('td, th');
+                        if (cells.length >= 2) setIf(getText(cells[0]), getText(cells[1]));
+                        if (cells.length >= 4) setIf(getText(cells[2]), getText(cells[3]));
+                    });
+                } catch (e) { /* keep going */ }
+
                 // 1. Case Details Table (case_details_table)
                 const caseDetailsTable = document.querySelector('table.case_details_table, .case_details_table');
                 if (caseDetailsTable) {
@@ -3220,13 +3242,17 @@ async def scrape_case_details(page) -> dict:
                     });
                 }
                 
-                // 3. Petitioner and Advocate
-                const petitionerSection = document.querySelector('table.Petitioner_Advocate_table, .table-bordered:has(td:contains("Petitioner"))');
-                const petitionerHeading = document.querySelector('h3:contains("Petitioner and Advocate"), h2:contains("Petitioner")');
+                // 3. Petitioner and Advocate (text-driven — :contains() is not
+                // valid CSS and was throwing, killing the whole extraction)
+                const petitionerHeading = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,caption,b,strong'))
+                    .find(h => /petitioner/i.test(h.textContent || ''));
                 if (petitionerHeading) {
                     let nextTable = petitionerHeading.nextElementSibling;
                     while (nextTable && nextTable.tagName !== 'TABLE') {
                         nextTable = nextTable.nextElementSibling;
+                    }
+                    if (!nextTable && petitionerHeading.parentElement) {
+                        nextTable = petitionerHeading.parentElement.querySelector('table');
                     }
                     if (nextTable) {
                         const rows = nextTable.querySelectorAll('tr');
@@ -3241,12 +3267,16 @@ async def scrape_case_details(page) -> dict:
                     }
                 }
                 
-                // 4. Respondent and Advocate
-                const respondentHeading = document.querySelector('h3:contains("Respondent and Advocate"), h2:contains("Respondent")');
+                // 4. Respondent and Advocate (text-driven, same reason as above)
+                const respondentHeading = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,caption,b,strong'))
+                    .find(h => /respondent/i.test(h.textContent || ''));
                 if (respondentHeading) {
                     let nextTable = respondentHeading.nextElementSibling;
                     while (nextTable && nextTable.tagName !== 'TABLE') {
                         nextTable = nextTable.nextElementSibling;
+                    }
+                    if (!nextTable && respondentHeading.parentElement) {
+                        nextTable = respondentHeading.parentElement.querySelector('table');
                     }
                     if (nextTable) {
                         const rows = nextTable.querySelectorAll('tr');
