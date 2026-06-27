@@ -18,7 +18,7 @@ This document turns that vision into an engineering plan and records what is
 | # | Brain | What it does | Implemented in this repo | Status |
 |---|-------|--------------|--------------------------|--------|
 | 1 | **Corpus** | Base memory: judgments, acts, rules, notifications, GOs, court rules, limitation/stamp/registration law | `schemas.RawDocument`, `SourceRef`, `LegalProvision`; ingestion via data sources catalog | 🟡 contracts done; ingestion pipeline TODO |
-| 2 | **Ratio & Principle** | Per judgment: issue, fact trigger, section interpreted, holding, ratio-vs-obiter, relief, stage, later treatment, good-law status | `schemas.CaseIntelligence`, `Issue`, `Holding`, `Argument`, `Treatment`; `extraction.ExtractionPipeline.extract_case()` | 🟢 contracts + pipeline interface + prompts |
+| 2 | **Ratio & Principle** | Per judgment: issue, fact trigger, section interpreted, holding, ratio-vs-obiter, relief, stage, later treatment, good-law status | `schemas.CaseIntelligence`, `Issue`, `Holding`, `Argument`, `Treatment`; `extraction.ExtractionPipeline.extract_case()`; **live via `llm.OpenAILLMClient` + `run_extraction.py`** | 🟢 contracts + pipeline + **live LLM extraction** |
 | 3 | **Legal Issue** | Issue-first retrieval: leading/recent/favourable/adverse cases, drafting points, evidence, objections, relief probability | `schemas.IssueMap`, `IssueMapEntry` | 🟢 contract; population pipeline TODO |
 | 4 | **Litigation Strategy** | Strongest ground, weakest point, opponent's likely arguments, documents needed, filing/forum, interim-relief probability, **risk before filing** | `schemas.CaseStrategy`, `RiskAssessment`, `RiskItem`; `extraction.DraftingPipeline.build_strategy()` | 🟢 contracts + interface + prompts |
 | 5 | **Drafting** | Court-ready drafts *from* facts/timeline/issues/law/strategy — not boilerplate | `schemas.DraftRequest`, `DraftArtifact`, `MatterFacts`, `TimelineEvent`; `extraction.DraftingPipeline` (6-stage flow) | 🟢 contracts + pipeline interface + prompts |
@@ -41,9 +41,24 @@ backend/intelligence/
 ├── __init__.py          # package exports
 ├── schemas.py           # all data contracts (Pydantic v2) — the "crown"
 ├── extraction.py        # ExtractionPipeline + DraftingPipeline + prompt templates
+├── llm.py               # OpenAILLMClient adapter (live extraction) + factory
+├── run_extraction.py    # end-to-end CLI: judgment text -> intelligence + digest
 └── example_case.json    # a worked, illustrative structured judgment
 test_intelligence.py     # validates schemas, graph derivation, pipeline wiring
+test_llm_client.py       # offline tests for the LLM adapter (stubbed model)
 ```
+
+**Live extraction is wired (one document end-to-end).** `llm.OpenAILLMClient`
+implements the `LLMClient` protocol over the OpenAI client the project already
+uses (JSON mode + schema-in-prompt + validate/retry). Run it:
+
+```bash
+export OPENAI_API_KEY_MY=sk-...          # the key convention from backend/app.py
+python -m intelligence.run_extraction judgment.txt --title "X v. Y" --out result.json
+# -> result.json: { case: CaseIntelligence, graph_edges: [...], digest: ChakshiDigest }
+```
+
+Without a key the CLI explains how to set one and exits cleanly.
 
 **Design decisions baked in:**
 
@@ -126,8 +141,8 @@ Drafting comes **after** analysis — a draft inherits the strategy's spine.
 
 ## Next implementation steps (concrete)
 
-1. **`LLMClient` adapter** — implement `complete_json` over the existing OpenAI
-   client (or a Claude client) using JSON/tool-calling + retry-on-invalid.
+1. ~~**`LLMClient` adapter**~~ — ✅ done (`llm.OpenAILLMClient`, JSON mode +
+   validate/retry; `run_extraction.py` runs one document end-to-end).
 2. **Ingestion service** — pull from the AWS HC/SC corpora + India Code; OCR via a
    `doctor`-style microservice; emit `RawDocument`s.
 3. **Storage** — a document store + vector index + a graph/edge table; implement
