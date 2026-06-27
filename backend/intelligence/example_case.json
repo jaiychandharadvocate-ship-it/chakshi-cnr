@@ -1,0 +1,78 @@
+{
+  "_note": "ILLUSTRATIVE / SYNTHETIC example showing the shape of refined intelligence. The case, parties, citations and paragraph numbers are invented placeholders — NOT real case law. Do not cite.",
+  "document_id": "ILLUS-0001",
+  "title": "ILLUSTRATIVE EXAMPLE — Aruna v. State (not a real case)",
+  "court": "High Court of Madras",
+  "court_level": "high_court",
+  "jurisdiction": "Tamil Nadu",
+  "bench": ["ILLUSTRATIVE J."],
+  "decision_date": "2023-04-12",
+  "citation": "[ILLUSTRATIVE] (placeholder)",
+  "neutral_citation": null,
+  "facts": [
+    "The appellant filed an appeal 95 days beyond the period of limitation.",
+    "The delay was attributed to the appellant's hospitalisation, supported by medical records.",
+    "The respondent opposed condonation, alleging the explanation was vague for part of the period."
+  ],
+  "procedural_stage": "first_appeal",
+  "issues": [
+    {
+      "question": "Whether sufficient cause was shown to condone the 95-day delay in filing the appeal?",
+      "fact_trigger": "Appeal filed 95 days late; delay explained by illness with medical records.",
+      "provisions": [
+        {"act": "Limitation Act, 1963", "section": "5", "short_label": "S.5 Limitation Act"}
+      ],
+      "issue_tags": ["delay_condonation", "sufficient_cause"],
+      "source": {"paragraphs": [3, 4]}
+    }
+  ],
+  "arguments": [
+    {
+      "side": "appellant",
+      "contention": "Illness constituted sufficient cause; a liberal approach should be taken to advance substantial justice.",
+      "provisions": [{"act": "Limitation Act, 1963", "section": "5"}],
+      "authorities": [],
+      "accepted": true
+    },
+    {
+      "side": "respondent",
+      "contention": "Each day's delay must be explained; the explanation for part of the period was vague.",
+      "authorities": [],
+      "accepted": false
+    }
+  ],
+  "provisions_interpreted": [
+    {"act": "Limitation Act, 1963", "section": "5", "short_label": "S.5 Limitation Act"}
+  ],
+  "cases_cited": [
+    {"title": "ILLUSTRATIVE precedent A", "citation": "[ILLUSTRATIVE-A]", "paragraphs": [6]}
+  ],
+  "holdings": [
+    {
+      "issue": "Whether sufficient cause was shown to condone the delay?",
+      "held": "Delay condoned on terms of costs; medical records established sufficient cause and the liberal approach favours hearing the appeal on merits.",
+      "ratio_type": "ratio",
+      "provisions": [{"act": "Limitation Act, 1963", "section": "5"}],
+      "reasoning_summary": "Substantial justice is preferred over a pedantic, day-to-day scrutiny where bona fide illness is shown.",
+      "source": {"paragraphs": [8, 9]}
+    }
+  ],
+  "relief_outcome": "allowed",
+  "relief_detail": "Delay condoned subject to costs of Rs. 5,000; appeal restored to file.",
+  "treats_earlier_cases": [
+    {
+      "case": {"title": "ILLUSTRATIVE precedent A", "citation": "[ILLUSTRATIVE-A]"},
+      "treatment": "followed",
+      "note": "Adopted the liberal-construction principle for S.5.",
+      "source": {"paragraphs": [6]}
+    }
+  ],
+  "good_law_status": "good_law",
+  "good_law_note": "No later treatment found in this illustrative record.",
+  "fact_pattern_tags": ["late_appeal", "illness_explanation", "costs_imposed"],
+  "issue_tags": ["delay_condonation", "sufficient_cause"],
+  "visibility": "public",
+  "extraction_model": "illustrative-fixture",
+  "confidence": 0.9,
+  "needs_human_review": false
+}

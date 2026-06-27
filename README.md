@@ -2,6 +2,12 @@
 
 A fully functional chatbot that automates form filling on the eCourts India website, captures CAPTCHA for human verification, and retrieves case details in a conversational manner.
 
+> 🧠 **The bigger picture — Chakshi as an Indian Legal Intelligence Engine:**
+> see [`docs/CHAKSHI_ARCHITECTURE.md`](docs/CHAKSHI_ARCHITECTURE.md) for the
+> 7-brains / 6-phases blueprint, and [`backend/intelligence/`](backend/intelligence/)
+> for the implemented structured-intelligence layer (turns raw judgments into
+> facts → issues → ratio → relief → strategy → drafting → citation graph).
+>
 > 📚 **Data sources for the legal knowledge base & model fine-tuning:** see
 > [`docs/INDIAN_LEGAL_DATA_SOURCES.md`](docs/INDIAN_LEGAL_DATA_SOURCES.md) — a curated,
 > verified catalog of Indian judgments, bare acts, government APIs, Indic-language
