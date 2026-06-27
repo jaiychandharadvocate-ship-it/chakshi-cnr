@@ -27,6 +27,11 @@ Legend:
 - 🔴 **Paid / proprietary** — reference or licensed-integration only; not redistributable.
 - ⚠️ **Unverified** — could not be confirmed during research; check manually before relying on it.
 
+> 🛠️ **Want to just download everything and dedup it for fine-tuning?** Use
+> [`../scripts/download_sources.sh`](../scripts/download_sources.sh) (bulk pull,
+> overlap-aware) then [`../scripts/dedup_clean.py`](../scripts/dedup_clean.py)
+> (dedup + noise/license/language filtering). See [`../scripts/README.md`](../scripts/README.md).
+
 > **Source note:** Entries marked ⚠️ (e.g. the KanoonGPT HF dataset, the Kaggle SC
 > dataset license, IL-TUR's exact license, and the two Indic items below) returned
 > HTTP 403 to automated fetching and were not in the search index. Open them in a
