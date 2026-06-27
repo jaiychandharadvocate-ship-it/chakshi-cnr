@@ -2,6 +2,11 @@
 
 A fully functional chatbot that automates form filling on the eCourts India website, captures CAPTCHA for human verification, and retrieves case details in a conversational manner.
 
+> 📚 **Data sources for the legal knowledge base & model fine-tuning:** see
+> [`docs/INDIAN_LEGAL_DATA_SOURCES.md`](docs/INDIAN_LEGAL_DATA_SOURCES.md) — a curated,
+> verified catalog of Indian judgments, bare acts, government APIs, Indic-language
+> corpora, and tooling, with licensing notes and a recommended build pipeline.
+
 ## 📋 Features
 
 - **Conversational Interface**: Natural, one-question-at-a-time chat flow
